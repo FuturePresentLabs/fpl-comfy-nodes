@@ -646,7 +646,8 @@ def hyperspace_command(input_path, output_path, scene_path, fps, resolution):
 
     render_bin = os.environ.get("HYPERSPACE_RENDER_BIN", "").strip()
     if render_bin:
-        return [render_bin, values["input"], values["output"], values["scene"], values["fps"], values["resolution"]], None
+        cwd = os.environ.get("HYPERSPACE_DIR", "").strip() or None
+        return [render_bin, values["input"], values["output"], values["scene"], values["fps"], values["resolution"]], cwd
 
     hyperspace_dir = os.environ.get("HYPERSPACE_DIR", "").strip()
     if hyperspace_dir:
@@ -667,6 +668,18 @@ def hyperspace_command(input_path, output_path, scene_path, fps, resolution):
         ], hyperspace_dir
 
     raise RuntimeError("Set HYPERSPACE_RENDER_BIN, HYPERSPACE_RENDER_COMMAND, or HYPERSPACE_DIR")
+
+
+def hyperspace_env():
+    env = os.environ.copy()
+    runtime_dir = env.get("XDG_RUNTIME_DIR", "").strip()
+    if not runtime_dir or not Path(runtime_dir).is_dir():
+        runtime_dir = "/tmp/fpl-hyperspace-runtime"
+        path = Path(runtime_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+        env["XDG_RUNTIME_DIR"] = runtime_dir
+    return env
 
 
 class FPLHyperspaceRender:
@@ -698,6 +711,7 @@ class FPLHyperspaceRender:
         completed = subprocess.run(
             command,
             cwd=cwd,
+            env=hyperspace_env(),
             timeout=int(timeout_seconds),
             check=False,
             text=True,

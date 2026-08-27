@@ -68,11 +68,34 @@ def test_node_mappings_include_media_nodes(monkeypatch, tmp_path):
 def test_hyperspace_render_bin_command(monkeypatch, tmp_path):
     plugin = load_plugin(monkeypatch, tmp_path)
     monkeypatch.setenv("HYPERSPACE_RENDER_BIN", "/opt/hyperspace/render")
+    monkeypatch.setenv("HYPERSPACE_DIR", "/opt/hyperspace")
+
+    command, cwd = plugin.hyperspace_command("in.wav", "out.mp4", "scenes/composed.toml", 30, "9:16")
+
+    assert cwd == "/opt/hyperspace"
+    assert command == ["/opt/hyperspace/render", "in.wav", "out.mp4", "scenes/composed.toml", "30", "9:16"]
+
+
+def test_hyperspace_render_bin_command_without_hyperspace_dir(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    monkeypatch.setenv("HYPERSPACE_RENDER_BIN", "/opt/hyperspace/render")
+    monkeypatch.delenv("HYPERSPACE_DIR", raising=False)
 
     command, cwd = plugin.hyperspace_command("in.wav", "out.mp4", "scenes/composed.toml", 30, "9:16")
 
     assert cwd is None
     assert command == ["/opt/hyperspace/render", "in.wav", "out.mp4", "scenes/composed.toml", "30", "9:16"]
+
+
+def test_hyperspace_env_creates_runtime_dir(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+
+    env = plugin.hyperspace_env()
+
+    assert env["XDG_RUNTIME_DIR"] == "/tmp/fpl-hyperspace-runtime"
+    assert plugin.Path(env["XDG_RUNTIME_DIR"]).is_dir()
 
 
 def test_hyperspace_command_template(monkeypatch, tmp_path):
