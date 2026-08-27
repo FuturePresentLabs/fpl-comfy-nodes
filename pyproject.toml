@@ -1,0 +1,10 @@
+[project]
+name = "fpl-comfy-nodes"
+version = "0.1.0"
+description = "Future Present Labs custom ComfyUI nodes"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
