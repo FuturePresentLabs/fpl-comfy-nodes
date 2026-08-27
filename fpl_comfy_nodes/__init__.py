@@ -73,6 +73,15 @@ MUSIC_MODELS = [
     "fal/ace-step",
 ]
 
+ACTOR_HEADER = "X-FPL-Actor"
+ACTOR_SIGNATURE_HEADER = "X-FPL-Actor-Signature"
+ACTOR_METADATA_KEYS = ("fpl_actor", "x-fpl-actor", "actor")
+ACTOR_SIGNATURE_METADATA_KEYS = (
+    "fpl_actor_signature",
+    "x-fpl-actor-signature",
+    "actor_signature",
+)
+
 
 @PromptServer.instance.routes.get("/fpl/workflows/openrouter-image")
 async def get_openrouter_image_workflow(request):
@@ -96,6 +105,61 @@ def base_url():
     return os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE") or BIFROST_BASE_URL
 
 
+def hidden_actor_inputs():
+    return {
+        "fpl_actor": "fpl_actor",
+        "fpl_actor_signature": "fpl_actor_signature",
+        "extra_pnginfo": "EXTRA_PNGINFO",
+    }
+
+
+def actor_headers(extra_pnginfo=None, fpl_actor=None, fpl_actor_signature=None):
+    actor = first_non_empty(fpl_actor)
+    signature = first_non_empty(fpl_actor_signature)
+    for source in metadata_sources(extra_pnginfo):
+        actor = actor or first_named_value(source, ACTOR_METADATA_KEYS)
+        signature = signature or first_named_value(source, ACTOR_SIGNATURE_METADATA_KEYS)
+
+    if actor and signature:
+        return {
+            ACTOR_HEADER: actor,
+            ACTOR_SIGNATURE_HEADER: signature,
+        }
+    if actor or signature:
+        raise RuntimeError("Bifrost actor attribution metadata is incomplete")
+    return {}
+
+
+def first_non_empty(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def first_named_value(source, keys):
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        value = first_non_empty(source.get(key))
+        if value:
+            return value
+    return None
+
+
+def metadata_sources(extra_pnginfo):
+    if not isinstance(extra_pnginfo, dict):
+        return []
+    sources = [extra_pnginfo]
+    fpl = extra_pnginfo.get("fpl")
+    if isinstance(fpl, dict):
+        sources.insert(0, fpl)
+    actor = extra_pnginfo.get("actor")
+    if isinstance(actor, dict):
+        sources.insert(0, actor)
+    return sources
+
+
 def output_dir():
     if folder_paths is not None:
         return Path(folder_paths.get_output_directory())
@@ -113,13 +177,20 @@ def read_json(request, timeout):
         raise RuntimeError(f"Bifrost request failed: {exc}") from exc
 
 
-def post_json(path, payload, timeout=600):
+def request_headers(extra_pnginfo=None, fpl_actor=None, fpl_actor_signature=None):
+    return {
+        "Authorization": "Bearer " + api_key(),
+        **actor_headers(extra_pnginfo, fpl_actor, fpl_actor_signature),
+    }
+
+
+def post_json(path, payload, timeout=600, extra_pnginfo=None, fpl_actor=None, fpl_actor_signature=None):
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         base_url().rstrip("/") + path,
         data=body,
         headers={
-            "Authorization": "Bearer " + api_key(),
+            **request_headers(extra_pnginfo, fpl_actor, fpl_actor_signature),
             "Content-Type": "application/json",
         },
         method="POST",
@@ -127,10 +198,10 @@ def post_json(path, payload, timeout=600):
     return read_json(request, timeout)
 
 
-def get_json(path, timeout=60):
+def get_json(path, timeout=60, extra_pnginfo=None, fpl_actor=None, fpl_actor_signature=None):
     request = urllib.request.Request(
         base_url().rstrip("/") + path,
-        headers={"Authorization": "Bearer " + api_key()},
+        headers=request_headers(extra_pnginfo, fpl_actor, fpl_actor_signature),
         method="GET",
     )
     return read_json(request, timeout)
@@ -283,7 +354,17 @@ def build_chat_messages(system, prompt, image=None):
     return messages
 
 
-def chat_completion(model, prompt, system, temperature, max_tokens, image=None):
+def chat_completion(
+    model,
+    prompt,
+    system,
+    temperature,
+    max_tokens,
+    image=None,
+    extra_pnginfo=None,
+    fpl_actor=None,
+    fpl_actor_signature=None,
+):
     data = post_json(
         "/chat/completions",
         {
@@ -292,6 +373,9 @@ def chat_completion(model, prompt, system, temperature, max_tokens, image=None):
             "temperature": float(temperature),
             "max_tokens": int(max_tokens),
         },
+        extra_pnginfo=extra_pnginfo,
+        fpl_actor=fpl_actor,
+        fpl_actor_signature=fpl_actor_signature,
     )
 
     choices = data.get("choices") or []
@@ -311,6 +395,7 @@ class FPLBifrostModel:
             "required": {
                 "model": (configured_chat_models(), {"default": "or/poolside/laguna-s-2.1"}),
             },
+            "hidden": hidden_actor_inputs(),
         }
 
     RETURN_TYPES = ("STRING",)
@@ -348,6 +433,7 @@ class FPLBifrostChatCompletion:
             "optional": {
                 "image": ("IMAGE",),
             },
+            "hidden": hidden_actor_inputs(),
         }
 
     RETURN_TYPES = ("STRING",)
@@ -356,8 +442,31 @@ class FPLBifrostChatCompletion:
     CATEGORY = "FPL/Bifrost"
     OUTPUT_NODE = True
 
-    def complete(self, model, prompt, system, temperature, max_tokens, image=None):
-        return (chat_completion(model, prompt, system, temperature, max_tokens, image),)
+    def complete(
+        self,
+        model,
+        prompt,
+        system,
+        temperature,
+        max_tokens,
+        image=None,
+        extra_pnginfo=None,
+        fpl_actor=None,
+        fpl_actor_signature=None,
+    ):
+        return (
+            chat_completion(
+                model,
+                prompt,
+                system,
+                temperature,
+                max_tokens,
+                image,
+                extra_pnginfo,
+                fpl_actor,
+                fpl_actor_signature,
+            ),
+        )
 
 
 class FPLBifrostTextGeneration(FPLBifrostChatCompletion):
@@ -391,6 +500,7 @@ class FPLBifrostCaptionNode:
                 "image": ("IMAGE",),
                 "video_path": ("STRING", {"default": ""}),
             },
+            "hidden": hidden_actor_inputs(),
         }
 
     RETURN_TYPES = ("STRING",)
@@ -399,10 +509,34 @@ class FPLBifrostCaptionNode:
     CATEGORY = "FPL/Bifrost"
     OUTPUT_NODE = True
 
-    def caption(self, model, prompt, system, temperature, max_tokens, image=None, video_path=""):
+    def caption(
+        self,
+        model,
+        prompt,
+        system,
+        temperature,
+        max_tokens,
+        image=None,
+        video_path="",
+        extra_pnginfo=None,
+        fpl_actor=None,
+        fpl_actor_signature=None,
+    ):
         if video_path and video_path.strip():
             prompt = f"{prompt}\n\nVideo file path for downstream context: {video_path.strip()}"
-        return (chat_completion(model, prompt, system, temperature, max_tokens, image),)
+        return (
+            chat_completion(
+                model,
+                prompt,
+                system,
+                temperature,
+                max_tokens,
+                image,
+                extra_pnginfo,
+                fpl_actor,
+                fpl_actor_signature,
+            ),
+        )
 
 
 class FPLBifrostImageGeneration:
@@ -431,7 +565,15 @@ class FPLBifrostImageGeneration:
     CATEGORY = "FPL/Bifrost"
     OUTPUT_NODE = True
 
-    def generate(self, model, prompt, aspect_ratio):
+    def generate(
+        self,
+        model,
+        prompt,
+        aspect_ratio,
+        extra_pnginfo=None,
+        fpl_actor=None,
+        fpl_actor_signature=None,
+    ):
         data = post_json(
             "/images/generations",
             {
@@ -440,6 +582,9 @@ class FPLBifrostImageGeneration:
                 "aspect_ratio": aspect_ratio,
                 "n": 1,
             },
+            extra_pnginfo=extra_pnginfo,
+            fpl_actor=fpl_actor,
+            fpl_actor_signature=fpl_actor_signature,
         )
 
         images = data.get("data") or []
@@ -486,6 +631,7 @@ class FPLBifrostVideoGeneration:
                 "reference_image": ("IMAGE",),
                 "reference_image_url": ("STRING", {"default": ""}),
             },
+            "hidden": hidden_actor_inputs(),
         }
 
     RETURN_TYPES = ("STRING", "STRING")
@@ -506,6 +652,9 @@ class FPLBifrostVideoGeneration:
         timeout_seconds,
         reference_image=None,
         reference_image_url="",
+        extra_pnginfo=None,
+        fpl_actor=None,
+        fpl_actor_signature=None,
     ):
         payload = {
             "model": model,
@@ -525,7 +674,14 @@ class FPLBifrostVideoGeneration:
                 image_ref["frame_type"] = image_mode
                 payload["frame_images"] = [image_ref]
 
-        job = post_json("/videos", payload, timeout=60)
+        job = post_json(
+            "/videos",
+            payload,
+            timeout=60,
+            extra_pnginfo=extra_pnginfo,
+            fpl_actor=fpl_actor,
+            fpl_actor_signature=fpl_actor_signature,
+        )
         job_id = job.get("id") or job.get("generation_id")
         if not job_id:
             raise RuntimeError("Bifrost video response did not include a job id")
@@ -538,7 +694,13 @@ class FPLBifrostVideoGeneration:
                 raise RuntimeError(f"Video generation timed out waiting for {job_id}")
             time.sleep(int(poll_interval_seconds))
             query = urllib.parse.urlencode({"model": model})
-            status = get_json(f"/videos/{job_id}?{query}", timeout=60)
+            status = get_json(
+                f"/videos/{job_id}?{query}",
+                timeout=60,
+                extra_pnginfo=extra_pnginfo,
+                fpl_actor=fpl_actor,
+                fpl_actor_signature=fpl_actor_signature,
+            )
 
         if str(status.get("status", "")).lower() != "completed":
             raise RuntimeError(f"Video generation {job_id} ended with status {status.get('status')}: {status}")
@@ -551,7 +713,7 @@ class FPLBifrostVideoGeneration:
             raw, content_type = download_url(
                 base_url().rstrip("/") + f"/videos/{job_id}/content?{query}",
                 timeout=600,
-                headers={"Authorization": "Bearer " + api_key()},
+                headers=request_headers(extra_pnginfo, fpl_actor, fpl_actor_signature),
             )
         ext = extension_for_content_type(content_type, "mp4")
         path = save_bytes("video", ext, raw)
@@ -576,6 +738,7 @@ class FPLBifrostMusicGeneration:
             "optional": {
                 "tags": ("STRING", {"default": ""}),
             },
+            "hidden": hidden_actor_inputs(),
         }
 
     RETURN_TYPES = ("STRING", "STRING")
@@ -595,6 +758,9 @@ class FPLBifrostMusicGeneration:
         guidance_scale,
         seed,
         tags="",
+        extra_pnginfo=None,
+        fpl_actor=None,
+        fpl_actor_signature=None,
     ):
         payload = {
             "model": model,
@@ -611,7 +777,14 @@ class FPLBifrostMusicGeneration:
         if tags and tags.strip():
             payload["tags"] = tags.strip()
 
-        data = post_json("/audio/generations", payload, timeout=1200)
+        data = post_json(
+            "/audio/generations",
+            payload,
+            timeout=1200,
+            extra_pnginfo=extra_pnginfo,
+            fpl_actor=fpl_actor,
+            fpl_actor_signature=fpl_actor_signature,
+        )
         outputs = data.get("data") or []
         if not outputs:
             raise RuntimeError("Bifrost music response did not include audio data")

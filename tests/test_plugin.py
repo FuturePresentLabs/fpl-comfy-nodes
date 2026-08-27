@@ -76,6 +76,35 @@ def test_hyperspace_render_bin_command(monkeypatch, tmp_path):
     assert command == ["/opt/hyperspace/render", "in.wav", "out.mp4", "scenes/composed.toml", "30", "9:16"]
 
 
+def test_actor_headers_reads_prompt_bound_metadata(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    headers = plugin.actor_headers(
+        {
+            "fpl": {
+                "fpl_actor": "payload",
+                "fpl_actor_signature": "v1=signature",
+            }
+        }
+    )
+
+    assert headers == {
+        "X-FPL-Actor": "payload",
+        "X-FPL-Actor-Signature": "v1=signature",
+    }
+
+
+def test_actor_headers_rejects_incomplete_metadata(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    try:
+        plugin.actor_headers({"fpl": {"fpl_actor": "payload"}})
+    except RuntimeError as exc:
+        assert "incomplete" in str(exc)
+    else:
+        raise AssertionError("expected incomplete actor metadata to fail")
+
+
 def test_hyperspace_render_bin_command_without_hyperspace_dir(monkeypatch, tmp_path):
     plugin = load_plugin(monkeypatch, tmp_path)
     monkeypatch.setenv("HYPERSPACE_RENDER_BIN", "/opt/hyperspace/render")
