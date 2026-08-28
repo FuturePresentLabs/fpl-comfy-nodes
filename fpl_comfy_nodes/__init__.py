@@ -1,5 +1,6 @@
 BIFROST_BASE_URL = "http://192.168.1.40:4040/v1"
 FPL_WORKFLOW_PATH = "/opt/fpl/comfyui/workflows/fpl-openrouter-image.json"
+PEXELS_BASE_URL = "https://api.pexels.com"
 
 import json
 import base64
@@ -72,6 +73,9 @@ MUSIC_MODELS = [
     "ace-step-v1.5",
     "fal/ace-step",
 ]
+
+PEXELS_IMAGE_SIZES = ["large2x", "large", "original", "medium", "small", "portrait", "landscape", "tiny"]
+PEXELS_VIDEO_QUALITIES = ["best", "uhd", "hd", "sd"]
 
 ACTOR_HEADER = "X-FPL-Actor"
 ACTOR_SIGNATURE_HEADER = "X-FPL-Actor-Signature"
@@ -316,6 +320,86 @@ def extension_for_content_type(content_type, fallback):
         "audio/flac": "flac",
         "audio/ogg": "ogg",
     }.get(content_type, fallback)
+
+
+def pexels_api_key():
+    value = os.environ.get("PEXELS_API_KEY", "").strip()
+    if not value:
+        raise RuntimeError("PEXELS_API_KEY is not set")
+    return value
+
+
+def pexels_search_url(path, params):
+    clean_params = {key: value for key, value in params.items() if value not in (None, "", "any")}
+    return PEXELS_BASE_URL.rstrip("/") + path + "?" + urllib.parse.urlencode(clean_params)
+
+
+def pexels_get_json(path, params, timeout=30):
+    request = urllib.request.Request(
+        pexels_search_url(path, params),
+        headers={"Authorization": pexels_api_key()},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(4096).decode("utf-8", "replace")
+        raise RuntimeError(f"Pexels returned HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Pexels request failed: {exc}") from exc
+
+
+def select_pexels_photo(response, result_index):
+    photos = response.get("photos") or []
+    if not photos:
+        raise RuntimeError("Pexels returned no photos")
+    index = int(result_index)
+    if index < 0 or index >= len(photos):
+        raise RuntimeError(f"Pexels photo result_index {index} is outside 0..{len(photos) - 1}")
+    return photos[index]
+
+
+def pexels_photo_src(photo, size):
+    src = photo.get("src") or {}
+    for key in [size, "large2x", "large", "original", "medium"]:
+        url = src.get(key)
+        if url:
+            return url, key
+    raise RuntimeError("Pexels photo did not include a downloadable src URL")
+
+
+def select_pexels_video(response, result_index):
+    videos = response.get("videos") or []
+    if not videos:
+        raise RuntimeError("Pexels returned no videos")
+    index = int(result_index)
+    if index < 0 or index >= len(videos):
+        raise RuntimeError(f"Pexels video result_index {index} is outside 0..{len(videos) - 1}")
+    return videos[index]
+
+
+def pexels_video_file(video, quality):
+    files = [
+        item
+        for item in video.get("video_files") or []
+        if item.get("link") and str(item.get("file_type", "")).startswith("video/")
+    ]
+    if not files:
+        raise RuntimeError("Pexels video did not include a downloadable video file")
+    if quality != "best":
+        exact = [item for item in files if item.get("quality") == quality]
+        if exact:
+            files = exact
+    return max(files, key=lambda item: int(item.get("width") or 0) * int(item.get("height") or 0))
+
+
+def pexels_license():
+    return {
+        "source": "Pexels",
+        "license_url": "https://www.pexels.com/license/",
+        "note": "Free for commercial use under the Pexels license; do not resell unmodified stock media.",
+    }
 
 
 def image_tensor_to_data_url(image):
@@ -802,6 +886,121 @@ class FPLBifrostMusicGeneration:
         return (path, metadata)
 
 
+class FPLPexelsPhotoSearch:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "query": ("STRING", {"default": "modular synthesizer", "multiline": False}),
+                "orientation": (["any", "landscape", "portrait", "square"], {"default": "portrait"}),
+                "size": (PEXELS_IMAGE_SIZES, {"default": "large2x"}),
+                "per_page": ("INT", {"default": 10, "min": 1, "max": 80, "step": 1}),
+                "page": ("INT", {"default": 1, "min": 1, "max": 1000, "step": 1}),
+                "result_index": ("INT", {"default": 0, "min": 0, "max": 79, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "image_path", "metadata")
+    FUNCTION = "search"
+    CATEGORY = "FPL/Stock"
+    OUTPUT_NODE = True
+
+    def search(self, query, orientation, size, per_page, page, result_index):
+        response = pexels_get_json(
+            "/v1/search",
+            {
+                "query": query,
+                "orientation": orientation,
+                "per_page": int(per_page),
+                "page": int(page),
+            },
+        )
+        photo = select_pexels_photo(response, result_index)
+        url, selected_size = pexels_photo_src(photo, size)
+        raw, content_type = download_url(url, timeout=120)
+        ext = extension_for_content_type(content_type, "jpg")
+        path = save_bytes("pexels_photo", ext, raw)
+
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+        array = numpy.asarray(image).astype(numpy.float32) / 255.0
+        tensor = torch.from_numpy(array)[None,]
+        metadata = json.dumps(
+            {
+                "kind": "photo",
+                "query": query,
+                "orientation": orientation,
+                "size": selected_size,
+                "path": path,
+                "pexels_id": photo.get("id"),
+                "photographer": photo.get("photographer"),
+                "photographer_url": photo.get("photographer_url"),
+                "source_url": photo.get("url"),
+                "download_url": url,
+                "width": image.width,
+                "height": image.height,
+                "license": pexels_license(),
+            }
+        )
+        return (tensor, path, metadata)
+
+
+class FPLPexelsVideoSearch:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "query": ("STRING", {"default": "synthesizer performance", "multiline": False}),
+                "orientation": (["any", "landscape", "portrait", "square"], {"default": "portrait"}),
+                "quality": (PEXELS_VIDEO_QUALITIES, {"default": "best"}),
+                "per_page": ("INT", {"default": 10, "min": 1, "max": 80, "step": 1}),
+                "page": ("INT", {"default": 1, "min": 1, "max": 1000, "step": 1}),
+                "result_index": ("INT", {"default": 0, "min": 0, "max": 79, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("video_path", "metadata")
+    FUNCTION = "search"
+    CATEGORY = "FPL/Stock"
+    OUTPUT_NODE = True
+
+    def search(self, query, orientation, quality, per_page, page, result_index):
+        response = pexels_get_json(
+            "/videos/search",
+            {
+                "query": query,
+                "orientation": orientation,
+                "per_page": int(per_page),
+                "page": int(page),
+            },
+        )
+        video = select_pexels_video(response, result_index)
+        selected_file = pexels_video_file(video, quality)
+        raw, content_type = download_url(selected_file["link"], timeout=600)
+        ext = extension_for_content_type(content_type, "mp4")
+        path = save_bytes("pexels_video", ext, raw)
+        metadata = json.dumps(
+            {
+                "kind": "video",
+                "query": query,
+                "orientation": orientation,
+                "quality": selected_file.get("quality"),
+                "path": path,
+                "pexels_id": video.get("id"),
+                "user": (video.get("user") or {}).get("name"),
+                "user_url": (video.get("user") or {}).get("url"),
+                "source_url": video.get("url"),
+                "download_url": selected_file.get("link"),
+                "width": selected_file.get("width"),
+                "height": selected_file.get("height"),
+                "duration": video.get("duration"),
+                "license": pexels_license(),
+            }
+        )
+        return (path, metadata)
+
+
 def hyperspace_command(input_path, output_path, scene_path, fps, resolution):
     values = {
         "input": str(input_path),
@@ -918,6 +1117,8 @@ NODE_CLASS_MAPPINGS = {
     "FPLBifrostImageGeneration": FPLBifrostImageGeneration,
     "FPLBifrostVideoGeneration": FPLBifrostVideoGeneration,
     "FPLBifrostMusicGeneration": FPLBifrostMusicGeneration,
+    "FPLPexelsPhotoSearch": FPLPexelsPhotoSearch,
+    "FPLPexelsVideoSearch": FPLPexelsVideoSearch,
     "FPLHyperspaceRender": FPLHyperspaceRender,
 }
 
@@ -929,6 +1130,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FPLBifrostImageGeneration": "FPL Bifrost Image Generation",
     "FPLBifrostVideoGeneration": "FPL Bifrost Video Generation",
     "FPLBifrostMusicGeneration": "FPL Bifrost Music Generation",
+    "FPLPexelsPhotoSearch": "FPL Pexels Photo Search",
+    "FPLPexelsVideoSearch": "FPL Pexels Video Search",
     "FPLHyperspaceRender": "FPL Hyperspace Render",
 }
 

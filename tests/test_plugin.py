@@ -59,6 +59,8 @@ def test_node_mappings_include_media_nodes(monkeypatch, tmp_path):
         "FPLBifrostTextGeneration",
         "FPLBifrostCaptionNode",
         "FPLBifrostMusicGeneration",
+        "FPLPexelsPhotoSearch",
+        "FPLPexelsVideoSearch",
         "FPLHyperspaceRender",
     ]:
         assert node in plugin.NODE_CLASS_MAPPINGS
@@ -74,6 +76,64 @@ def test_hyperspace_render_bin_command(monkeypatch, tmp_path):
 
     assert cwd == "/opt/hyperspace"
     assert command == ["/opt/hyperspace/render", "in.wav", "out.mp4", "scenes/composed.toml", "30", "9:16"]
+
+
+def test_pexels_search_url_omits_any_orientation(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    url = plugin.pexels_search_url(
+        "/v1/search",
+        {"query": "modular synth", "orientation": "any", "per_page": 10, "page": 1},
+    )
+
+    assert url == "https://api.pexels.com/v1/search?query=modular+synth&per_page=10&page=1"
+
+
+def test_pexels_photo_src_prefers_requested_size(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    url, size = plugin.pexels_photo_src(
+        {"src": {"large": "https://example.test/large.jpg", "large2x": "https://example.test/large2x.jpg"}},
+        "large",
+    )
+
+    assert url == "https://example.test/large.jpg"
+    assert size == "large"
+
+
+def test_pexels_video_file_picks_largest_quality_match(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    selected = plugin.pexels_video_file(
+        {
+            "video_files": [
+                {
+                    "quality": "hd",
+                    "file_type": "video/mp4",
+                    "width": 1280,
+                    "height": 720,
+                    "link": "https://example.test/720.mp4",
+                },
+                {
+                    "quality": "hd",
+                    "file_type": "video/mp4",
+                    "width": 1920,
+                    "height": 1080,
+                    "link": "https://example.test/1080.mp4",
+                },
+                {
+                    "quality": "sd",
+                    "file_type": "video/mp4",
+                    "width": 640,
+                    "height": 360,
+                    "link": "https://example.test/360.mp4",
+                },
+            ]
+        },
+        "hd",
+    )
+
+    assert selected["link"] == "https://example.test/1080.mp4"
 
 
 def test_actor_headers_reads_prompt_bound_metadata(monkeypatch, tmp_path):

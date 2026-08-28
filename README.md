@@ -13,6 +13,8 @@ belong in `elmers`.
 - `FPLBifrostTextGeneration`
 - `FPLBifrostCaptionNode`
 - `FPLBifrostMusicGeneration`
+- `FPLPexelsPhotoSearch`
+- `FPLPexelsVideoSearch`
 - `FPLHyperspaceRender`
 
 ## Runtime Configuration
@@ -34,6 +36,16 @@ HYPERSPACE_DIR=/opt/fpl/hyperspace
 
 `HYPERSPACE_RENDER_BIN` is preferred for production. `HYPERSPACE_DIR` falls
 back to `cargo run --release --features render --example render`.
+
+Pexels stock-media nodes require:
+
+```bash
+PEXELS_API_KEY=...
+```
+
+Downloaded media is written to the ComfyUI output directory under
+`fpl_bifrost/`, and metadata includes the Pexels source URL, creator, and
+license URL.
 
 ## Development
 
