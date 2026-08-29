@@ -79,6 +79,7 @@ PEXELS_VIDEO_QUALITIES = ["best", "uhd", "hd", "sd"]
 
 ACTOR_HEADER = "X-FPL-Actor"
 ACTOR_SIGNATURE_HEADER = "X-FPL-Actor-Signature"
+DOWNLOAD_USER_AGENT = "FPLComfyNodes/1.0"
 ACTOR_METADATA_KEYS = ("fpl_actor", "x-fpl-actor", "actor")
 ACTOR_SIGNATURE_METADATA_KEYS = (
     "fpl_actor_signature",
@@ -297,7 +298,12 @@ def save_path(kind, ext):
 
 
 def download_url(url, timeout=600, headers=None):
-    request = urllib.request.Request(url, headers=headers or {}, method="GET")
+    request_headers = {
+        "User-Agent": DOWNLOAD_USER_AGENT,
+        "Accept": "application/octet-stream, video/*, audio/*, image/*;q=0.9, */*;q=0.8",
+        **(headers or {}),
+    }
+    request = urllib.request.Request(url, headers=request_headers, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read(), response.headers.get("content-type", "")

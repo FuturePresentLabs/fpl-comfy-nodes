@@ -165,6 +165,66 @@ def test_actor_headers_rejects_incomplete_metadata(monkeypatch, tmp_path):
         raise AssertionError("expected incomplete actor metadata to fail")
 
 
+def test_download_url_sends_named_user_agent(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    captured = {}
+
+    class Response:
+        headers = {"content-type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"video"
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(plugin.urllib.request, "urlopen", fake_urlopen)
+
+    data, content_type = plugin.download_url("https://ai.fpl.dev/v1/media/test", headers={"Authorization": "Bearer token"})
+
+    assert data == b"video"
+    assert content_type == "video/mp4"
+    assert captured["timeout"] == 600
+    assert captured["request"].get_header("User-agent") == "FPLComfyNodes/1.0"
+    assert captured["request"].get_header("Accept") == "application/octet-stream, video/*, audio/*, image/*;q=0.9, */*;q=0.8"
+    assert captured["request"].get_header("Authorization") == "Bearer token"
+
+
+def test_download_url_allows_caller_user_agent(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    captured = {}
+
+    class Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"ok"
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        return Response()
+
+    monkeypatch.setattr(plugin.urllib.request, "urlopen", fake_urlopen)
+
+    plugin.download_url("https://ai.fpl.dev/v1/media/test", headers={"User-Agent": "Custom/2.0"})
+
+    assert captured["request"].get_header("User-agent") == "Custom/2.0"
+
+
 def test_hyperspace_render_bin_command_without_hyperspace_dir(monkeypatch, tmp_path):
     plugin = load_plugin(monkeypatch, tmp_path)
     monkeypatch.setenv("HYPERSPACE_RENDER_BIN", "/opt/hyperspace/render")
