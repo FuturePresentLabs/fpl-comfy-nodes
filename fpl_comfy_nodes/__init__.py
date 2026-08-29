@@ -79,7 +79,12 @@ PEXELS_VIDEO_QUALITIES = ["best", "uhd", "hd", "sd"]
 
 ACTOR_HEADER = "X-FPL-Actor"
 ACTOR_SIGNATURE_HEADER = "X-FPL-Actor-Signature"
-DOWNLOAD_USER_AGENT = "FPLComfyNodes/1.0"
+DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+FPL_DOWNLOAD_HOSTS = ("ai.fpl.dev", "bifrost.fpl.dev", "palisade.fpl.dev")
 ACTOR_METADATA_KEYS = ("fpl_actor", "x-fpl-actor", "actor")
 ACTOR_SIGNATURE_METADATA_KEYS = (
     "fpl_actor_signature",
@@ -108,6 +113,34 @@ def api_key():
 
 def base_url():
     return os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE") or BIFROST_BASE_URL
+
+
+def fpl_download_hosts():
+    raw = os.environ.get("FPL_DOWNLOAD_REWRITE_HOSTS")
+    if not raw:
+        return set(FPL_DOWNLOAD_HOSTS)
+    return {host.strip().lower() for host in raw.split(",") if host.strip()}
+
+
+def direct_download_base_url():
+    return os.environ.get("FPL_DOWNLOAD_BASE_URL") or os.environ.get("FPL_DIRECT_DOWNLOAD_BASE_URL") or base_url()
+
+
+def rewrite_download_url(url):
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url
+
+    host = (parsed.hostname or "").lower()
+    if host not in fpl_download_hosts():
+        return url
+
+    direct = urllib.parse.urlparse(direct_download_base_url().rstrip("/"))
+    if not direct.scheme or not direct.netloc:
+        return url
+
+    path = parsed.path or "/"
+    return urllib.parse.urlunparse((direct.scheme, direct.netloc, path, "", parsed.query, parsed.fragment))
 
 
 def hidden_actor_inputs():
@@ -298,9 +331,12 @@ def save_path(kind, ext):
 
 
 def download_url(url, timeout=600, headers=None):
+    url = rewrite_download_url(url)
     request_headers = {
         "User-Agent": DOWNLOAD_USER_AGENT,
         "Accept": "application/octet-stream, video/*, audio/*, image/*;q=0.9, */*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "close",
         **(headers or {}),
     }
     request = urllib.request.Request(url, headers=request_headers, method="GET")

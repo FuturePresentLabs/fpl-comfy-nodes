@@ -165,7 +165,24 @@ def test_actor_headers_rejects_incomplete_metadata(monkeypatch, tmp_path):
         raise AssertionError("expected incomplete actor metadata to fail")
 
 
-def test_download_url_sends_named_user_agent(monkeypatch, tmp_path):
+def test_download_url_rewrites_fpl_media_to_direct_bifrost(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://192.168.1.40:4040/v1")
+
+    assert (
+        plugin.rewrite_download_url("https://ai.fpl.dev/v1/videos/job/content?model=fpl%2Fvideo")
+        == "http://192.168.1.40:4040/v1/videos/job/content?model=fpl%2Fvideo"
+    )
+
+
+def test_download_url_does_not_rewrite_external_media(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://192.168.1.40:4040/v1")
+
+    assert plugin.rewrite_download_url("https://videos.pexels.com/video-files/test.mp4") == "https://videos.pexels.com/video-files/test.mp4"
+
+
+def test_download_url_sends_browser_headers(monkeypatch, tmp_path):
     plugin = load_plugin(monkeypatch, tmp_path)
     captured = {}
 
@@ -193,8 +210,10 @@ def test_download_url_sends_named_user_agent(monkeypatch, tmp_path):
     assert data == b"video"
     assert content_type == "video/mp4"
     assert captured["timeout"] == 600
-    assert captured["request"].get_header("User-agent") == "FPLComfyNodes/1.0"
+    assert captured["request"].get_full_url() == "http://192.168.1.40:4040/v1/media/test"
+    assert captured["request"].get_header("User-agent").startswith("Mozilla/5.0")
     assert captured["request"].get_header("Accept") == "application/octet-stream, video/*, audio/*, image/*;q=0.9, */*;q=0.8"
+    assert captured["request"].get_header("Accept-language") == "en-US,en;q=0.9"
     assert captured["request"].get_header("Authorization") == "Bearer token"
 
 
