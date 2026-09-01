@@ -732,6 +732,7 @@ class FPLBifrostImageGeneration:
                     {"default": "1:1"},
                 ),
             },
+            "hidden": hidden_actor_inputs(),
         }
 
     RETURN_TYPES = ("IMAGE", "STRING")

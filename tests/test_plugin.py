@@ -67,6 +67,18 @@ def test_node_mappings_include_media_nodes(monkeypatch, tmp_path):
         assert node in plugin.NODE_DISPLAY_NAME_MAPPINGS
 
 
+def test_image_generation_declares_hidden_actor_inputs(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    hidden = plugin.FPLBifrostImageGeneration.INPUT_TYPES()["hidden"]
+
+    assert hidden == {
+        "fpl_actor": "fpl_actor",
+        "fpl_actor_signature": "fpl_actor_signature",
+        "extra_pnginfo": "EXTRA_PNGINFO",
+    }
+
+
 def test_hyperspace_render_bin_command(monkeypatch, tmp_path):
     plugin = load_plugin(monkeypatch, tmp_path)
     monkeypatch.setenv("HYPERSPACE_RENDER_BIN", "/opt/hyperspace/render")
