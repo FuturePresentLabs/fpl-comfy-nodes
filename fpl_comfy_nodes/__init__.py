@@ -91,6 +91,16 @@ ACTOR_SIGNATURE_METADATA_KEYS = (
     "x-fpl-actor-signature",
     "actor_signature",
 )
+USAGE_CONTEXT_METADATA_KEYS = ("fpl_usage_context", "x-fpl-usage-context", "usage_context")
+USAGE_CONTEXT_SIGNATURE_METADATA_KEYS = (
+    "fpl_usage_context_signature",
+    "x-fpl-usage-context-signature",
+    "usage_context_signature",
+)
+PROJECT_METADATA_KEYS = ("fpl_project", "x-fpl-project")
+WORKFLOW_METADATA_KEYS = ("fpl_workflow", "x-fpl-workflow")
+TRACE_ID_METADATA_KEYS = ("fpl_trace_id", "x-fpl-trace-id")
+PARENT_REQUEST_ID_METADATA_KEYS = ("fpl_parent_request_id", "x-fpl-parent-request-id")
 
 
 @PromptServer.instance.routes.get("/fpl/workflows/openrouter-image")
@@ -168,6 +178,44 @@ def actor_headers(extra_pnginfo=None, fpl_actor=None, fpl_actor_signature=None):
     return {}
 
 
+def usage_context_headers(extra_pnginfo=None):
+    context = None
+    signature = None
+    project = first_non_empty(os.environ.get("FPL_USAGE_PROJECT")) or "comfyui"
+    workflow = first_non_empty(os.environ.get("FPL_USAGE_WORKFLOW"))
+    trace_id = first_non_empty(os.environ.get("FPL_USAGE_TRACE_ID"))
+    parent_request_id = first_non_empty(os.environ.get("FPL_USAGE_PARENT_REQUEST_ID"))
+
+    for source in metadata_sources(extra_pnginfo):
+        context = context or first_named_value(source, USAGE_CONTEXT_METADATA_KEYS)
+        signature = signature or first_named_value(source, USAGE_CONTEXT_SIGNATURE_METADATA_KEYS)
+        project = first_named_value(source, PROJECT_METADATA_KEYS) or project
+        workflow = first_named_value(source, WORKFLOW_METADATA_KEYS) or workflow
+        trace_id = first_named_value(source, TRACE_ID_METADATA_KEYS) or trace_id
+        parent_request_id = (
+            first_named_value(source, PARENT_REQUEST_ID_METADATA_KEYS) or parent_request_id
+        )
+
+    if context and signature:
+        return {
+            "X-FPL-Usage-Context": context,
+            "X-FPL-Usage-Context-Signature": signature,
+        }
+    if context or signature:
+        raise RuntimeError("Bifrost usage context attribution metadata is incomplete")
+
+    headers = {}
+    if project:
+        headers["X-FPL-Project"] = project
+    if workflow:
+        headers["X-FPL-Workflow"] = workflow
+    if trace_id:
+        headers["X-FPL-Trace-Id"] = trace_id
+    if parent_request_id:
+        headers["X-FPL-Parent-Request-Id"] = parent_request_id
+    return headers
+
+
 def first_non_empty(value):
     if value is None:
         return None
@@ -219,6 +267,7 @@ def request_headers(extra_pnginfo=None, fpl_actor=None, fpl_actor_signature=None
     return {
         "Authorization": "Bearer " + api_key(),
         **actor_headers(extra_pnginfo, fpl_actor, fpl_actor_signature),
+        **usage_context_headers(extra_pnginfo),
     }
 
 

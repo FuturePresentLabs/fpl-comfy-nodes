@@ -165,6 +165,57 @@ def test_actor_headers_rejects_incomplete_metadata(monkeypatch, tmp_path):
         raise AssertionError("expected incomplete actor metadata to fail")
 
 
+def test_usage_context_headers_reads_signed_prompt_metadata(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    headers = plugin.usage_context_headers(
+        {
+            "fpl": {
+                "fpl_usage_context": "context-payload",
+                "fpl_usage_context_signature": "v1=context-signature",
+            }
+        }
+    )
+
+    assert headers == {
+        "X-FPL-Usage-Context": "context-payload",
+        "X-FPL-Usage-Context-Signature": "v1=context-signature",
+    }
+
+
+def test_usage_context_headers_rejects_incomplete_signed_metadata(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    try:
+        plugin.usage_context_headers({"fpl": {"fpl_usage_context": "payload"}})
+    except RuntimeError as exc:
+        assert "incomplete" in str(exc)
+    else:
+        raise AssertionError("expected incomplete usage context metadata to fail")
+
+
+def test_usage_context_headers_adds_direct_project_hints(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    monkeypatch.setenv("FPL_USAGE_PROJECT", "creative-render")
+
+    headers = plugin.usage_context_headers(
+        {
+            "fpl": {
+                "fpl_workflow": "workflow-42",
+                "fpl_trace_id": "prompt-7",
+                "fpl_parent_request_id": "conversation-3",
+            }
+        }
+    )
+
+    assert headers == {
+        "X-FPL-Project": "creative-render",
+        "X-FPL-Workflow": "workflow-42",
+        "X-FPL-Trace-Id": "prompt-7",
+        "X-FPL-Parent-Request-Id": "conversation-3",
+    }
+
+
 def test_download_url_rewrites_fpl_media_to_direct_bifrost(monkeypatch, tmp_path):
     plugin = load_plugin(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_BASE_URL", "http://192.168.1.40:4040/v1")
