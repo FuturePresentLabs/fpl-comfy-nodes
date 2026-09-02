@@ -4,7 +4,9 @@ PEXELS_BASE_URL = "https://api.pexels.com"
 
 import json
 import base64
+import contextvars
 import io
+import logging
 import os
 import shlex
 import subprocess
@@ -101,6 +103,8 @@ PROJECT_METADATA_KEYS = ("fpl_project", "x-fpl-project")
 WORKFLOW_METADATA_KEYS = ("fpl_workflow", "x-fpl-workflow")
 TRACE_ID_METADATA_KEYS = ("fpl_trace_id", "x-fpl-trace-id")
 PARENT_REQUEST_ID_METADATA_KEYS = ("fpl_parent_request_id", "x-fpl-parent-request-id")
+PROMPT_ATTRIBUTION = contextvars.ContextVar("fpl_prompt_attribution", default=None)
+COMFY_PROMPT_PATHS = {"/prompt", "/api/prompt"}
 
 
 @PromptServer.instance.routes.get("/fpl/workflows/openrouter-image")
@@ -112,6 +116,119 @@ async def get_openrouter_image_workflow(request):
         return web.json_response(json.loads(path.read_text()))
     except json.JSONDecodeError as exc:
         return web.json_response({"error": f"Invalid workflow JSON: {exc}"}, status=500)
+
+
+@web.middleware
+async def fpl_prompt_attribution_middleware(request, handler):
+    token = None
+    if request.method == "POST" and request.path in COMFY_PROMPT_PATHS:
+        attribution = prompt_attribution_from_headers(request.headers)
+        if attribution:
+            token = PROMPT_ATTRIBUTION.set(attribution)
+    try:
+        return await handler(request)
+    finally:
+        if token is not None:
+            PROMPT_ATTRIBUTION.reset(token)
+
+
+def register_prompt_attribution_hooks():
+    server = PromptServer.instance
+    if getattr(server, "_fpl_prompt_attribution_registered", False):
+        return
+
+    if hasattr(server, "add_on_prompt_handler"):
+        server.add_on_prompt_handler(inject_prompt_attribution_from_context)
+
+    app = getattr(server, "app", None)
+    middlewares = getattr(app, "middlewares", None)
+    if middlewares is not None:
+        try:
+            middlewares.append(fpl_prompt_attribution_middleware)
+        except RuntimeError:
+            logging.warning("FPL prompt attribution middleware could not be registered")
+
+    server._fpl_prompt_attribution_registered = True
+
+
+def prompt_attribution_from_headers(headers):
+    actor = header_value(headers, ACTOR_HEADER)
+    signature = header_value(headers, ACTOR_SIGNATURE_HEADER)
+    if actor or signature:
+        if not actor or not signature:
+            logging.warning("Ignoring incomplete FPL actor headers on Comfy prompt")
+            actor = None
+            signature = None
+
+    usage_context = header_value(headers, "X-FPL-Usage-Context")
+    usage_context_signature = header_value(headers, "X-FPL-Usage-Context-Signature")
+    if usage_context or usage_context_signature:
+        if not usage_context or not usage_context_signature:
+            logging.warning("Ignoring incomplete FPL usage context headers on Comfy prompt")
+            usage_context = None
+            usage_context_signature = None
+
+    attribution = {
+        "fpl_project": header_value(headers, "X-FPL-Project")
+        or os.environ.get("FPL_USAGE_PROJECT")
+        or "comfyui",
+    }
+    optional_headers = {
+        "fpl_workflow": "X-FPL-Workflow",
+        "fpl_trace_id": "X-FPL-Trace-Id",
+        "fpl_parent_request_id": "X-FPL-Parent-Request-Id",
+    }
+    for key, header in optional_headers.items():
+        value = header_value(headers, header)
+        if value:
+            attribution[key] = value
+
+    if actor and signature:
+        attribution["fpl_actor"] = actor
+        attribution["fpl_actor_signature"] = signature
+    if usage_context and usage_context_signature:
+        attribution["fpl_usage_context"] = usage_context
+        attribution["fpl_usage_context_signature"] = usage_context_signature
+
+    return attribution if len(attribution) > 1 or attribution.get("fpl_project") else None
+
+
+def header_value(headers, name):
+    value = None
+    if hasattr(headers, "get"):
+        value = headers.get(name)
+        if value is None:
+            value = headers.get(name.lower())
+    return first_non_empty(value)
+
+
+def inject_prompt_attribution_from_context(json_data):
+    attribution = PROMPT_ATTRIBUTION.get()
+    if not attribution or not isinstance(json_data, dict):
+        return json_data
+    inject_prompt_attribution(json_data, attribution)
+    return json_data
+
+
+def inject_prompt_attribution(json_data, attribution):
+    extra_data = json_data.setdefault("extra_data", {})
+    if not isinstance(extra_data, dict):
+        return
+
+    for key, value in attribution.items():
+        extra_data[key] = value
+
+    extra_pnginfo = extra_data.setdefault("extra_pnginfo", {})
+    if not isinstance(extra_pnginfo, dict):
+        return
+    fpl = extra_pnginfo.setdefault("fpl", {})
+    if not isinstance(fpl, dict):
+        return
+    for key, value in attribution.items():
+        fpl[key] = value
+
+
+register_prompt_attribution_hooks()
 
 
 def api_key():

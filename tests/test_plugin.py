@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 import sys
 import types
 
@@ -11,14 +12,25 @@ class _Routes:
         return decorator
 
 
+class _PromptServer:
+    def __init__(self):
+        self.routes = _Routes()
+        self.app = types.SimpleNamespace(middlewares=[])
+        self.on_prompt_handlers = []
+
+    def add_on_prompt_handler(self, handler):
+        self.on_prompt_handlers.append(handler)
+
+
 def install_comfy_stubs(monkeypatch, tmp_path):
     server = types.ModuleType("server")
-    server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(routes=_Routes()))
+    server.PromptServer = types.SimpleNamespace(instance=_PromptServer())
     monkeypatch.setitem(sys.modules, "server", server)
 
     aiohttp = types.ModuleType("aiohttp")
     web = types.ModuleType("aiohttp.web")
     web.json_response = lambda *args, **kwargs: (args, kwargs)
+    web.middleware = lambda func: func
     aiohttp.web = web
     monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
     monkeypatch.setitem(sys.modules, "aiohttp.web", web)
@@ -77,6 +89,76 @@ def test_image_generation_declares_hidden_actor_inputs(monkeypatch, tmp_path):
         "fpl_actor_signature": "fpl_actor_signature",
         "extra_pnginfo": "EXTRA_PNGINFO",
     }
+
+
+def test_prompt_attribution_hooks_are_registered(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    server = plugin.PromptServer.instance
+
+    assert plugin.fpl_prompt_attribution_middleware in server.app.middlewares
+    assert plugin.inject_prompt_attribution_from_context in server.on_prompt_handlers
+
+
+def test_prompt_header_attribution_defaults_to_comfy_project(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+
+    attribution = plugin.prompt_attribution_from_headers(
+        {
+            "X-FPL-Actor": "payload",
+            "X-FPL-Actor-Signature": "v1=signature",
+            "X-FPL-Workflow": "workflow-42",
+        }
+    )
+
+    assert attribution == {
+        "fpl_project": "comfyui",
+        "fpl_workflow": "workflow-42",
+        "fpl_actor": "payload",
+        "fpl_actor_signature": "v1=signature",
+    }
+
+
+def test_prompt_handler_persists_request_attribution(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    token = plugin.PROMPT_ATTRIBUTION.set(
+        {
+            "fpl_project": "comfyui",
+            "fpl_actor": "payload",
+            "fpl_actor_signature": "v1=signature",
+        }
+    )
+    try:
+        prompt = {"prompt": {}, "extra_data": {"client_id": "abc"}}
+        plugin.inject_prompt_attribution_from_context(prompt)
+    finally:
+        plugin.PROMPT_ATTRIBUTION.reset(token)
+
+    assert prompt["extra_data"]["client_id"] == "abc"
+    assert prompt["extra_data"]["fpl_actor"] == "payload"
+    assert prompt["extra_data"]["extra_pnginfo"]["fpl"]["fpl_project"] == "comfyui"
+    assert prompt["extra_data"]["extra_pnginfo"]["fpl"]["fpl_actor_signature"] == "v1=signature"
+
+
+def test_prompt_middleware_exposes_headers_to_prompt_handler(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    request = types.SimpleNamespace(
+        method="POST",
+        path="/api/prompt",
+        headers={
+            "X-FPL-Actor": "payload",
+            "X-FPL-Actor-Signature": "v1=signature",
+        },
+    )
+
+    async def handler(_request):
+        prompt = {"prompt": {}}
+        return plugin.inject_prompt_attribution_from_context(prompt)
+
+    prompt = asyncio.run(plugin.fpl_prompt_attribution_middleware(request, handler))
+
+    assert prompt["extra_data"]["fpl_project"] == "comfyui"
+    assert prompt["extra_data"]["extra_pnginfo"]["fpl"]["fpl_actor"] == "payload"
 
 
 def test_hyperspace_render_bin_command(monkeypatch, tmp_path):
