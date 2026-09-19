@@ -1,5 +1,8 @@
 import importlib
 import asyncio
+import io
+import json
+import logging
 import sys
 import types
 
@@ -89,6 +92,49 @@ def test_image_generation_declares_hidden_actor_inputs(monkeypatch, tmp_path):
         "fpl_actor_signature": "fpl_actor_signature",
         "extra_pnginfo": "EXTRA_PNGINFO",
     }
+
+
+def test_media_models_are_discovered_by_explicit_capability(monkeypatch, tmp_path):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    monkeypatch.setenv("BIFROST_API_KEY", "secret")
+    monkeypatch.setenv("FPL_MODEL_DISCOVERY_TTL_SECONDS", "0")
+    payload = {
+        "data": [
+            {"id": "or-img/z-model", "routable": True, "capabilities": ["image-generation"]},
+            {"id": "fpl/image", "routable": True, "capabilities": ["image-generation"]},
+            {"id": "not-routable", "routable": False, "capabilities": ["image-generation"]},
+            {"id": "or-video/a-model", "routable": True, "capabilities": ["video-generation"]},
+            {"id": "prefix-is-not-a-contract", "routable": True, "capabilities": []},
+        ]
+    }
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append((request, timeout))
+        return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(plugin.urllib.request, "urlopen", urlopen)
+
+    assert plugin.configured_image_models() == ["fpl/image", "or-img/z-model"]
+    assert plugin.configured_video_models() == ["fpl/video", "or-video/a-model"]
+    assert requests[0][0].get_header("Authorization") == "Bearer secret"
+
+
+def test_media_discovery_failure_is_visible_and_only_uses_stable_alias(
+    monkeypatch, tmp_path, caplog
+):
+    plugin = load_plugin(monkeypatch, tmp_path)
+    monkeypatch.setenv("BIFROST_API_KEY", "secret")
+    monkeypatch.setenv("FPL_MODEL_DISCOVERY_TTL_SECONDS", "0")
+
+    def fail(_request, timeout):
+        raise plugin.urllib.error.URLError(f"offline after {timeout}s")
+
+    monkeypatch.setattr(plugin.urllib.request, "urlopen", fail)
+    with caplog.at_level(logging.ERROR):
+        assert plugin.configured_image_models() == ["fpl/image"]
+
+    assert "model discovery failed" in caplog.text
 
 
 def test_prompt_attribution_hooks_are_registered(monkeypatch, tmp_path):

@@ -10,6 +10,7 @@ import logging
 import os
 import shlex
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -49,25 +50,10 @@ CHAT_MODELS = [
 
 IMAGE_MODELS = [
     "fpl/image",
-    "agora/image",
-    "or-img/black-forest-labs/flux.2-klein-4b",
-    "or-img/black-forest-labs/flux.2-pro",
-    "or-img/black-forest-labs/flux.2-flex",
-    "or-img/black-forest-labs/flux.2-max",
 ]
 
 VIDEO_MODELS = [
     "fpl/video",
-    "or-video/bytedance/seedance-1-5-pro",
-    "or-video/bytedance/seedance-2.0-fast",
-    "or-video/bytedance/seedance-2.0",
-    "or-video/alibaba/wan-2.6",
-    "or-video/alibaba/wan-2.7",
-    "or-video/kwaivgi/kling-v3.0-std",
-    "or-video/kwaivgi/kling-v3.0-pro",
-    "or-video/kwaivgi/kling-video-o1",
-    "or-video/google/veo-3.1",
-    "or-video/openai/sora-2-pro",
 ]
 
 MUSIC_MODELS = [
@@ -105,6 +91,8 @@ TRACE_ID_METADATA_KEYS = ("fpl_trace_id", "x-fpl-trace-id")
 PARENT_REQUEST_ID_METADATA_KEYS = ("fpl_parent_request_id", "x-fpl-parent-request-id")
 PROMPT_ATTRIBUTION = contextvars.ContextVar("fpl_prompt_attribution", default=None)
 COMFY_PROMPT_PATHS = {"/prompt", "/api/prompt"}
+CAPABILITY_MODEL_CACHE = {}
+CAPABILITY_MODEL_CACHE_LOCK = threading.Lock()
 
 
 @PromptServer.instance.routes.get("/fpl/workflows/openrouter-image")
@@ -441,6 +429,77 @@ def configured_models(defaults, include):
     return preferred + extras
 
 
+def configured_capability_models(capability, stable_alias):
+    api_key_value = os.environ.get("BIFROST_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key_value:
+        logging.error(
+            "Cannot discover Bifrost %s models: BIFROST_API_KEY or OPENAI_API_KEY is not set; "
+            "exposing stable alias %s only",
+            capability,
+            stable_alias,
+        )
+        return [stable_alias]
+
+    inventory_url = base_url().rstrip("/") + "/models"
+    cache_key = (inventory_url, capability)
+    try:
+        cache_ttl = max(0.0, float(os.environ.get("FPL_MODEL_DISCOVERY_TTL_SECONDS", "60")))
+    except ValueError:
+        logging.error("Invalid FPL_MODEL_DISCOVERY_TTL_SECONDS; using 60 seconds")
+        cache_ttl = 60.0
+    now = time.monotonic()
+    with CAPABILITY_MODEL_CACHE_LOCK:
+        cached = CAPABILITY_MODEL_CACHE.get(cache_key)
+        if cached and now - cached[0] < cache_ttl:
+            return list(cached[1])
+
+    request = urllib.request.Request(
+        inventory_url,
+        headers={"Authorization": "Bearer " + api_key_value},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.load(response)
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise ValueError("Bifrost model inventory has no data array")
+        models = sorted(
+            {
+                row["id"]
+                for row in rows
+                if isinstance(row, dict)
+                and isinstance(row.get("id"), str)
+                and row.get("routable") is True
+                and capability in (row.get("capabilities") or [])
+            }
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        with CAPABILITY_MODEL_CACHE_LOCK:
+            CAPABILITY_MODEL_CACHE.pop(cache_key, None)
+        logging.error(
+            "Bifrost %s model discovery failed (%s); exposing stable alias %s only",
+            capability,
+            exc,
+            stable_alias,
+        )
+        return [stable_alias]
+
+    if not models:
+        with CAPABILITY_MODEL_CACHE_LOCK:
+            CAPABILITY_MODEL_CACHE.pop(cache_key, None)
+        logging.error(
+            "Bifrost advertised no routable %s models; exposing stable alias %s only",
+            capability,
+            stable_alias,
+        )
+        return [stable_alias]
+    discovered = [stable_alias] + [model for model in models if model != stable_alias]
+    with CAPABILITY_MODEL_CACHE_LOCK:
+        CAPABILITY_MODEL_CACHE[cache_key] = (now, discovered)
+    return discovered
+
+
 def model_modality(item):
     profile = item.get("bifrost_profile") if isinstance(item, dict) else None
     return profile.get("modality") if isinstance(profile, dict) else None
@@ -456,21 +515,11 @@ def configured_chat_models():
 
 
 def configured_image_models():
-    return configured_models(
-        IMAGE_MODELS,
-        lambda model_id, item: model_modality(item) == "image"
-        or model_id in ("fpl/image", "agora/image")
-        or model_id.startswith("or-img/"),
-    )
+    return configured_capability_models("image-generation", "fpl/image")
 
 
 def configured_video_models():
-    return configured_models(
-        VIDEO_MODELS,
-        lambda model_id, item: model_modality(item) == "video"
-        or model_id == "fpl/video"
-        or model_id.startswith("or-video/"),
-    )
+    return configured_capability_models("video-generation", "fpl/video")
 
 
 def configured_music_models():
